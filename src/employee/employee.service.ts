@@ -515,232 +515,367 @@ export class EmployeeService {
       throw new InternalServerErrorException('Error changing password');
     }
   }
-  // Fungsi baru untuk create clock-in
+
+  // Fungsi clock-in
   async createClockIn(
-    token_auth: string,
-    createClockInDto: CreateClockInDto,
-  ): Promise<any> {
-    const { id_employee, address, latitude, longitude, photo, time } =
-      createClockInDto;
+  token_auth: string,
+  createClockInDto: CreateClockInDto,
+): Promise<any> {
+  const { id_employee, address, latitude, longitude, photo, time } =
+    createClockInDto;
 
+  try {
+    // Verifikasi token
+    let decodedToken;
     try {
-      // Verifikasi token
-      let decodedToken;
-      try {
-        decodedToken = this.jwtService.verify(token_auth); // Verifying JWT token
-      } catch (error) {
-        if (error.name === 'JsonWebTokenError') {
-          throw new UnauthorizedException('Invalid token format');
-        } else if (error.name === 'TokenExpiredError') {
-          throw new UnauthorizedException('Token expired');
-        } else {
-          throw new UnauthorizedException('Token verification failed');
-        }
+      decodedToken = this.jwtService.verify(token_auth); // Verifying JWT token
+    } catch (error) {
+      if (error.name === 'JsonWebTokenError') {
+        throw new UnauthorizedException('Invalid token format');
+      } else if (error.name === 'TokenExpiredError') {
+        throw new UnauthorizedException('Token expired');
+      } else {
+        throw new UnauthorizedException('Token verification failed');
       }
+    }
 
-      // Cari employee berdasarkan id_employee
-      const employee = await this.employeeRepository.findOne({
-        where: { id_employee },
-        relations: ['company', 'jobInformation'],
+    // Cari employee berdasarkan id_employee
+    const employee = await this.employeeRepository.findOne({
+      where: { id_employee },
+      relations: ['company', 'jobInformation'],
+    });
+
+    if (!employee) {
+      throw new NotFoundException('Employee not found');
+    }
+
+    // Ambil informasi perusahaan
+    const company = employee.company;
+    if (!company) {
+      throw new NotFoundException('Company not found for this employee');
+    }
+
+    const currentDate = new Date(); // Tanggal saat ini
+    const startOfDay = new Date(currentDate);
+    startOfDay.setHours(0, 0, 0, 0); // Mulai dari 00:00 hari ini
+
+    const lastAttendance = await this.dailyAttendanceRepository.findOne({
+      where: { employee: { id_employee } },
+      order: { created_at: 'DESC' },
+    });
+
+    const lastDate = lastAttendance
+      ? new Date(lastAttendance.created_at)
+      : new Date(employee.created_at);
+    lastDate.setDate(lastDate.getDate() + 1);
+
+    // Loop untuk mengecek hari-hari yang absen
+    let consecutiveAbsences = 0;
+    while (lastDate < startOfDay) {
+      const startOfLastDate = new Date(lastDate);
+      startOfLastDate.setHours(0, 0, 0, 0);
+      const endOfLastDate = new Date(lastDate);
+      endOfLastDate.setHours(23, 59, 59, 999);
+
+      const attendance = await this.dailyAttendanceRepository.findOne({
+        where: {
+          employee: { id_employee },
+          created_at: Between(startOfLastDate, endOfLastDate),
+        },
       });
 
-      if (!employee) {
-        throw new NotFoundException('Employee not found');
+      if (!attendance) {
+        const alphaAttendance = new DailyAttendance();
+        alphaAttendance.employee = employee;
+        alphaAttendance.attend_status = 'A'; // Alpha untuk tidak hadir
+        alphaAttendance.created_at = startOfLastDate;
+        alphaAttendance.meal_money = 10000;
+
+        await this.dailyAttendanceRepository.save(alphaAttendance);
+
+        consecutiveAbsences += 1;
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        consecutiveAbsences = 0; // Reset jika ada kehadiran
       }
-
-      // Ambil informasi perusahaan
-      const company = employee.company;
-      if (!company) {
-        throw new NotFoundException('Company not found for this employee');
-      }
-
-      const currentDate = new Date(); // Tanggal saat ini
-      const startOfDay = new Date(currentDate);
-      startOfDay.setHours(0, 0, 0, 0); // Mulai dari 00:00 hari ini
-
-      const lastAttendance = await this.dailyAttendanceRepository.findOne({
-        where: { employee: { id_employee } },
-        order: { created_at: 'DESC' },
-      });
-
-      const lastDate = lastAttendance
-        ? new Date(lastAttendance.created_at)
-        : new Date(employee.created_at);
       lastDate.setDate(lastDate.getDate() + 1);
+    }
 
-      // Loop untuk mengecek hari-hari yang absen
-      let consecutiveAbsences = 0;
-      while (lastDate < startOfDay) {
-        const startOfLastDate = new Date(lastDate);
-        startOfLastDate.setHours(0, 0, 0, 0);
-        const endOfLastDate = new Date(lastDate);
-        endOfLastDate.setHours(23, 59, 59, 999);
+    // Validasi Clock-In
+    const endOfDay = new Date(currentDate);
+    endOfDay.setHours(23, 59, 59, 999);
+    const existingAttendance = await this.dailyAttendanceRepository.findOne({
+      where: {
+        created_at: Between(startOfDay, endOfDay),
+        clockOut: null,
+      },
+      relations: ['clockIn', 'clockIn.employee'],
+    });
 
-        const attendance = await this.dailyAttendanceRepository.findOne({
-          where: {
-            employee: { id_employee },
-            created_at: Between(startOfLastDate, endOfLastDate),
-          },
+    if (
+      existingAttendance &&
+      existingAttendance.clockIn &&
+      existingAttendance.clockIn.employee &&
+      existingAttendance.clockIn.employee.id_employee === id_employee
+    ) {
+      throw new BadRequestException('You have already clocked in for today.');
+    }
+
+    // Hitung jarak antara lokasi clock-in dan lokasi perusahaan
+    const distance = calculateDistance(
+      company.latitude,
+      company.longitude,
+      latitude,
+      longitude,
+    );
+
+    // Periksa apakah jarak dalam radius yang diizinkan (misal radius dalam meter)
+    if (distance > company.set_radius) {
+      throw new BadRequestException(
+        `Clock-in location is outside the allowed radius (${company.set_radius} meters)`,
+      );
+    }
+
+    // Hapus '/clockin/' dari nama file jika ada
+    const photoFileName = photo.replace('/clockin/', '');
+
+    // Path untuk gambar asli dan kompres
+    const originalPhotoPath = join(__dirname, '../../clockin', photoFileName);
+    const compressedPhotoPath = join(
+      __dirname,
+      '../../clockin',
+      `id_employee-${employee.id_employee}-${photoFileName}`,
+    );
+
+    // Kompres gambar menggunakan Sharp
+    await sharp(originalPhotoPath)
+      .resize(500) // Sesuaikan ukuran gambar, misalnya menjadi lebar 500px
+      .jpeg({ quality: 80 }) // Mengatur format menjadi JPEG dengan kualitas 80%
+      .toFile(compressedPhotoPath); // Simpan hasil kompresi ke path baru
+
+    // Hapus file foto asli setelah kompresi
+    if (fs.existsSync(originalPhotoPath)) {
+      await fs.remove(originalPhotoPath); // Menghapus file asli setelah kompresi
+    }
+
+    // Update nama file di database
+    employee.employee_photo = `id_employee-${employee.id_employee}-${photoFileName}`;
+    await this.employeeRepository.save(employee);
+
+    // Simpan clockIn data ke database
+    const clockIn = new ClockIn();
+    clockIn.address = address;
+    clockIn.latitude = latitude;
+    clockIn.longitude = longitude;
+    clockIn.attendance_photo = `id_employee-${employee.id_employee}-${photo}`;
+    clockIn.created_at = new Date();
+    clockIn.time = time;
+    clockIn.employee = employee;
+
+    await this.clockInRepository.save(clockIn);
+
+    // Simpan dailyAttendance
+    const dailyAttendance = new DailyAttendance();
+    dailyAttendance.catering_fee = 1000;
+    dailyAttendance.meal_money = 9000;
+    dailyAttendance.overtime_total_hour = 2.5;
+    dailyAttendance.created_at = currentDate;
+    dailyAttendance.clockIn = clockIn;
+    dailyAttendance.employee = employee;
+    dailyAttendance.attend_status = 'H';
+    await this.dailyAttendanceRepository.save(dailyAttendance);
+
+    // Panggil function calculateMonthlyAttendance setelah dailyAttendance disimpan
+    await this.calculateMonthlyAttendance(id_employee, currentDate);
+
+    return {
+      statusCode: 201,
+      status: 'success',
+      data: {
+        employee: employee.employee_name,
+        department: employee.jobInformation
+          ? employee.jobInformation.user_department
+          : 'Department not found',
+        position: employee.jobInformation
+          ? employee.jobInformation.user_position
+          : 'Position not found',
+        date: currentDate.toISOString().split('T')[0],
+        time: currentDate.toTimeString().split(' ')[0],
+      },
+      message: 'Successfully clocked in',
+    };
+  } catch (error) {
+    console.log(error);
+    if (
+      error instanceof BadRequestException ||
+      error instanceof NotFoundException ||
+      error instanceof UnauthorizedException
+    ) {
+      throw error;
+    }
+
+    throw new InternalServerErrorException('Error clocking in');
+  }
+}
+
+
+  async calculateMonthlyAttendance(id_employee: number, date: Date) {
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1; // Bulan saat ini (November misalnya)
+    const startOfMonth = new Date(year, month - 1, 1); // Awal bulan
+    const endOfMonth = new Date(year, month, 0); // Hari terakhir dalam bulan ini
+
+    // Cari employee berdasarkan id_employee
+    const employee = await this.employeeRepository.findOne({
+        where: { id_employee },
+        relations: ['monthlyAttendances'],
+    });
+
+    if (!employee) {
+        throw new NotFoundException('Employee not found');
+    }
+
+    // Cari tanggal terakhir hadir sebelum tanggal hari ini (kehadiran 'H')
+    const lastAttendance = await this.dailyAttendanceRepository.findOne({
+        where: { employee: { id_employee }, attend_status: 'H' },
+        order: { created_at: 'DESC' },
+    });
+
+    let lastDate = lastAttendance ? new Date(lastAttendance.created_at) : null;
+
+    // Jika ada kehadiran terakhir yang ditemukan
+    if (lastDate) {
+        lastDate.setDate(lastDate.getDate() + 1); // Mulai dari hari berikutnya
+        const lastDateMonth = lastDate.getMonth() + 1; // Bulan kehadiran terakhir
+        
+        // Jika kehadiran terakhir di bulan sebelumnya, isi hari alpha dari tanggal terakhir hingga akhir bulan
+        if (lastDateMonth < month) {
+            const endOfLastMonth = new Date(year, lastDateMonth, 0); // Akhir bulan sebelumnya
+            while (lastDate <= endOfLastMonth) {
+                const alphaAttendance = await this.dailyAttendanceRepository.findOne({
+                    where: {
+                        employee: { id_employee },
+                        created_at: Between(lastDate, lastDate),
+                    },
+                });
+
+                if (!alphaAttendance) {
+                    // Buat entri absensi alpha jika belum ada
+                    const newAlpha = new DailyAttendance();
+                    newAlpha.employee = employee;
+                    newAlpha.attend_status = 'A'; // Alpha untuk tidak hadir
+                    newAlpha.created_at = new Date(lastDate);
+                    newAlpha.meal_money = 10000; // Contoh nilai uang makan
+                    await this.dailyAttendanceRepository.save(newAlpha);
+                }
+
+                lastDate.setDate(lastDate.getDate() + 1); // Lanjut ke hari berikutnya
+            }
+
+            // Setelah mengisi bulan sebelumnya, kita buat atau update entri bulan tersebut
+            let lastMonthAttendance = await this.monthlyAttendanceRepository.findOne({
+                where: {
+                    employee: { id_employee },
+                    salary_period: `${year}-${lastDateMonth}`,
+                },
+            });
+
+            if (!lastMonthAttendance) {
+                // Buat entri baru jika belum ada untuk bulan sebelumnya
+                lastMonthAttendance = new MonthlyAttendance();
+                lastMonthAttendance.employee = employee;
+                lastMonthAttendance.salary_period = `${year}-${lastDateMonth}`;
+            }
+
+            // Perbarui data kehadiran bulanan
+            await this.updateMonthlyAttendance(lastMonthAttendance, id_employee, lastDateMonth, year);
+        }
+
+        // Sekarang kita sudah berada di bulan baru (November), kita buat atau update data bulan baru
+        let currentMonthAttendance = await this.monthlyAttendanceRepository.findOne({
+            where: {
+                employee: { id_employee },
+                salary_period: `${year}-${month}`,
+            },
         });
 
-        if (!attendance) {
-          const alphaAttendance = new DailyAttendance();
-          alphaAttendance.employee = employee;
-          alphaAttendance.attend_status = 'A'; // Alpha untuk tidak hadir
-          alphaAttendance.created_at = startOfLastDate;
-          alphaAttendance.meal_money = 10000;
-
-          await this.dailyAttendanceRepository.save(alphaAttendance);
-
-          consecutiveAbsences += 1;
-        } else {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          consecutiveAbsences = 0; // Reset jika ada kehadiran
+        if (!currentMonthAttendance) {
+            // Buat entri baru untuk bulan baru jika belum ada
+            currentMonthAttendance = new MonthlyAttendance();
+            currentMonthAttendance.employee = employee;
+            currentMonthAttendance.salary_period = `${year}-${month}`;
         }
-        lastDate.setDate(lastDate.getDate() + 1);
-      }
 
-      // if (consecutiveAbsences > 2) {
-      //   console.log('Karyawan tidak hadir lebih dari dua hari berturut-turut');
-      // }
+        // Update kehadiran bulanan untuk bulan baru
+        await this.updateMonthlyAttendance(currentMonthAttendance, id_employee, month, year);
+    } else {
+        // Jika tidak ada kehadiran sebelumnya, buat entri baru untuk bulan saat ini
+        let currentMonthAttendance = await this.monthlyAttendanceRepository.findOne({
+            where: {
+                employee: { id_employee },
+                salary_period: `${year}-${month}`,
+            },
+        });
 
-      // --- Validasi Clock-In
-      const endOfDay = new Date(currentDate);
-      endOfDay.setHours(23, 59, 59, 999);
-      const existingAttendance = await this.dailyAttendanceRepository.findOne({
-        where: {
-          created_at: Between(startOfDay, endOfDay),
-          clockOut: null,
-        },
-        relations: ['clockIn', 'clockIn.employee'],
-      });
+        if (!currentMonthAttendance) {
+            // Buat entri baru jika belum ada
+            currentMonthAttendance = new MonthlyAttendance();
+            currentMonthAttendance.employee = employee;
+            currentMonthAttendance.salary_period = `${year}-${month}`;
+        }
 
-      if (
-        existingAttendance &&
-        existingAttendance.clockIn &&
-        existingAttendance.clockIn.employee &&
-        existingAttendance.clockIn.employee.id_employee === id_employee
-      ) {
-        throw new BadRequestException('You have already clocked in for today.');
-      }
-
-      // Hitung jarak antara lokasi clock-in dan lokasi perusahaan
-      const distance = calculateDistance(
-        company.latitude,
-        company.longitude,
-        latitude,
-        longitude,
-      );
-
-      // Periksa apakah jarak dalam radius yang diizinkan (misal radius dalam meter)
-      if (distance > company.set_radius) {
-        throw new BadRequestException(
-          `Clock-in location is outside the allowed radius (${company.set_radius} meters)`,
-        );
-      }
-
-      // Hapus '/clockin/' dari nama file jika ada
-      const photoFileName = photo.replace('/clockin/', '');
-
-      // Path untuk gambar asli dan kompres
-      const originalPhotoPath = join(__dirname, '../../clockin', photoFileName);
-      const compressedPhotoPath = join(
-        __dirname,
-        '../../clockin',
-        `id_employee-${employee.id_employee}-${photoFileName}`,
-      );
-
-      // Kompres gambar menggunakan Sharp
-      await sharp(originalPhotoPath)
-        .resize(500) // Sesuaikan ukuran gambar, misalnya menjadi lebar 500px
-        .jpeg({ quality: 80 }) // Mengatur format menjadi JPEG dengan kualitas 80%
-        .toFile(compressedPhotoPath); // Simpan hasil kompresi ke path baru
-
-      // Hapus file foto asli setelah kompresi
-      if (fs.existsSync(originalPhotoPath)) {
-        await fs.remove(originalPhotoPath); // Menghapus file asli setelah kompresi
-      }
-      // Hapus foto lama jika ada
-      const oldPhotoPath = join(
-        __dirname,
-        '../../clockin',
-        employee.employee_photo,
-      );
-      if (employee.employee_photo && fs.existsSync(oldPhotoPath)) {
-        await fs.remove(oldPhotoPath); // Menghapus file foto lama
-      }
-
-      // Update nama file di database
-      employee.employee_photo = `id_employee-${employee.id_employee}-${photoFileName}`;
-      await this.employeeRepository.save(employee);
-
-      // Simpan clockIn data ke database
-      const clockIn = new ClockIn();
-      clockIn.address = address;
-      clockIn.latitude = latitude;
-      clockIn.longitude = longitude;
-      clockIn.attendance_photo = `id_employee-${employee.id_employee}-${photo}`;
-      clockIn.created_at = new Date();
-      clockIn.time = time;
-      clockIn.employee = employee;
-
-      await this.clockInRepository.save(clockIn);
-
-      // Simpan dailyAttendance
-      const dailyAttendance = new DailyAttendance();
-      dailyAttendance.catering_fee = 1000;
-      dailyAttendance.meal_money = 9000;
-      dailyAttendance.overtime_total_hour = 2.5;
-      dailyAttendance.created_at = currentDate;
-      dailyAttendance.clockIn = clockIn;
-      dailyAttendance.employee = employee;
-      dailyAttendance.attend_status = 'H';
-      await this.dailyAttendanceRepository.save(dailyAttendance);
-      //memakai function monthattend
-      const monthAttendanceDto: MonthAttendanceEmployeeDto = {
-        id_employee,
-        month: currentDate.getMonth() + 1,
-        year: currentDate.getFullYear(),
-      };
-
-      await this.monthAttendance(token_auth, monthAttendanceDto);
-
-      const paySlipEmployeeDto: PaySlipEmployeeDto = {
-        id_employee,
-        month: currentDate.getMonth() + 1,
-        year: currentDate.getFullYear(),
-      };
-
-      await this.paySlip(token_auth, paySlipEmployeeDto);
-      return {
-        statusCode: 201,
-        status: 'success',
-        data: {
-          employee: employee.employee_name,
-          department: employee.jobInformation
-            ? employee.jobInformation.user_department
-            : 'Department not found',
-          position: employee.jobInformation
-            ? employee.jobInformation.user_position
-            : 'Position not found',
-          date: currentDate.toISOString().split('T')[0],
-          time: currentDate.toTimeString().split(' ')[0],
-        },
-        message: 'Successfully clocked in',
-      };
-    } catch (error) {
-      console.log(error);
-      if (
-        error instanceof BadRequestException ||
-        error instanceof NotFoundException ||
-        error instanceof UnauthorizedException
-      ) {
-        throw error;
-      }
-
-      throw new InternalServerErrorException('Error clocking in');
+        // Update kehadiran bulanan
+        await this.updateMonthlyAttendance(currentMonthAttendance, id_employee, month, year);
     }
-  }
+}
+
+// Fungsi helper untuk memperbarui atau membuat entri kehadiran bulanan
+async updateMonthlyAttendance(monthlyAttendance: MonthlyAttendance, id_employee: number, month: number, year: number) {
+    const startOfMonth = new Date(year, month - 1, 1);
+    const endOfMonth = new Date(year, month, 0);
+
+    const dailyAttendance = await this.dailyAttendanceRepository
+        .createQueryBuilder('daily_attendance')
+        .select('COUNT(*)', 'total_days')
+        .addSelect(
+            "SUM(CASE WHEN daily_attendance.attend_status = 'H' THEN 1 ELSE 0 END)",
+            'days_present',
+        )
+        .addSelect(
+            "SUM(CASE WHEN daily_attendance.attend_status = 'A' THEN 1 ELSE 0 END)",
+            'alpha_days',
+        )
+        .addSelect(
+            "SUM(CASE WHEN daily_attendance.attend_status = 'I' THEN 1 ELSE 0 END)",
+            'permit_days',
+        )
+        .addSelect(
+            'SUM(COALESCE(daily_attendance.overtime_total_hour, 0))',
+            'overtime_total',
+        )
+        .addSelect('SUM(COALESCE(daily_attendance.half_day, 0))', 'half_days')
+        .where('daily_attendance.employee_id = :id_employee', { id_employee })
+        .andWhere(
+            'daily_attendance.created_at BETWEEN :startOfMonth AND :endOfMonth',
+            { startOfMonth, endOfMonth },
+        )
+        .getRawOne();
+
+    // Update data kehadiran bulanan
+    monthlyAttendance.alpha = parseFloat(dailyAttendance.alpha_days) || 0;
+    monthlyAttendance.permit = parseFloat(dailyAttendance.permit_days) || 0;
+    monthlyAttendance.attend = parseFloat(dailyAttendance.days_present) || 0;
+    monthlyAttendance.total_hour_overtime =
+        parseFloat(dailyAttendance.overtime_total) || 0;
+    monthlyAttendance.half_day = parseFloat(dailyAttendance.half_days) || 0;
+
+    // Simpan ke database
+    await this.monthlyAttendanceRepository.save(monthlyAttendance);
+}
+
+
+
+
 
   // Fungsi baru untuk create clock-out
   async createClockOut(

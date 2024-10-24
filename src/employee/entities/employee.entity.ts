@@ -98,11 +98,10 @@ export class Employee {
   )
   dailyAttendance: DailyAttendance;
 
-  @OneToOne(
-    () => MonthlyAttendance,
-    (monthlyAttendance) => monthlyAttendance.employee,
-  )
-  monthlyAttendance: MonthlyAttendance;
+    // Di entitas Employee:
+  @OneToMany(() => MonthlyAttendance, (monthlyAttendance) => monthlyAttendance.employee)
+  monthlyAttendances: MonthlyAttendance[];
+
 
   @OneToOne(() => PaySlip, (paySlip) => paySlip.employee)
   paySlip: PaySlip;

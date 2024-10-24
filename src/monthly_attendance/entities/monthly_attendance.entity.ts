@@ -47,10 +47,11 @@ export class MonthlyAttendance {
   @Column({ type: 'integer' })
   overtime: number;
 
-  // Tambahkan relasi Many-to-One ke Employee
-  @OneToOne(() => Employee, (employee) => employee.monthlyAttendance)
-  @JoinColumn({ name: 'employee_id' }) // Foreign key
+    // Di entitas MonthlyAttendance:
+  @ManyToOne(() => Employee, (employee) => employee.monthlyAttendances)
+  @JoinColumn({ name: 'employee_id' })
   employee: Employee;
+
 
   // Relasi Many-to-One dengan TotalMonthlyAttendance
   @ManyToOne(() => PaySlip, (PaySlip) => PaySlip.monthlyAttendances)
