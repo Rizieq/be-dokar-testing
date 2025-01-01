@@ -717,15 +717,15 @@ export class EmployeeService {
     throw new InternalServerErrorException('Error clocking in');
   }
 }
-
-
-  async calculateMonthlyAttendance(id_employee: number, date: Date) {
+async calculateMonthlyAttendance(id_employee: number, date: Date) {
     const year = date.getFullYear();
-    const month = date.getMonth() + 1; // Bulan saat ini (November misalnya)
-    const startOfMonth = new Date(year, month - 1, 1); // Awal bulan
-    const endOfMonth = new Date(year, month, 0); // Hari terakhir dalam bulan ini
+    const month = date.getMonth() + 1; // Month in JavaScript starts from 0
+    const startOfMonth = new Date(year, month - 1, 1); // Start of the current month
+    const endOfMonth = new Date(year, month, 0); // End of the current month
+    const previousMonth = new Date(year, month - 2, 1); // Start of the previous month
+    const endOfPreviousMonth = new Date(year, month - 1, 0); // End of the previous month
 
-    // Cari employee berdasarkan id_employee
+    // Find the employee based on id_employee
     const employee = await this.employeeRepository.findOne({
         where: { id_employee },
         relations: ['monthlyAttendances'],
@@ -735,105 +735,56 @@ export class EmployeeService {
         throw new NotFoundException('Employee not found');
     }
 
-    // Cari tanggal terakhir hadir sebelum tanggal hari ini (kehadiran 'H')
-    const lastAttendance = await this.dailyAttendanceRepository.findOne({
-        where: { employee: { id_employee }, attend_status: 'H' },
-        order: { created_at: 'DESC' },
+    // Check if there is an attendance record for the previous month
+    const previousMonthlyAttendance = await this.monthlyAttendanceRepository.findOne({
+        where: {
+            employee: { id_employee },
+            salary_period: `${previousMonth.getFullYear()}-${previousMonth.getMonth() + 1}`,
+        },
     });
 
-    let lastDate = lastAttendance ? new Date(lastAttendance.created_at) : null;
+    if (previousMonthlyAttendance) {
+        // If there is a previous record, update it by recalculating the attendance data
+        const previousDailyAttendance = await this.dailyAttendanceRepository
+            .createQueryBuilder('daily_attendance')
+            .select('COUNT(*)', 'total_days')
+            .addSelect(
+                "SUM(CASE WHEN daily_attendance.attend_status = 'H' THEN 1 ELSE 0 END)",
+                'days_present',
+            )
+            .addSelect(
+                "SUM(CASE WHEN daily_attendance.attend_status = 'A' THEN 1 ELSE 0 END)",
+                'alpha_days',
+            )
+            .addSelect(
+                "SUM(CASE WHEN daily_attendance.attend_status = 'I' THEN 1 ELSE 0 END)",
+                'permit_days',
+            )
+            .addSelect(
+                'SUM(COALESCE(daily_attendance.overtime_total_hour, 0))',
+                'overtime_total',
+            )
+            .addSelect('SUM(COALESCE(daily_attendance.half_day, 0))', 'half_days')
+            .where('daily_attendance.employee_id = :id_employee', { id_employee })
+            .andWhere(
+                'daily_attendance.created_at BETWEEN :startOfPreviousMonth AND :endOfPreviousMonth',
+                { startOfPreviousMonth: previousMonth, endOfPreviousMonth },
+            )
+            .getRawOne();
 
-    // Jika ada kehadiran terakhir yang ditemukan
-    if (lastDate) {
-        lastDate.setDate(lastDate.getDate() + 1); // Mulai dari hari berikutnya
-        const lastDateMonth = lastDate.getMonth() + 1; // Bulan kehadiran terakhir
-        
-        // Jika kehadiran terakhir di bulan sebelumnya, isi hari alpha dari tanggal terakhir hingga akhir bulan
-        if (lastDateMonth < month) {
-            const endOfLastMonth = new Date(year, lastDateMonth, 0); // Akhir bulan sebelumnya
-            while (lastDate <= endOfLastMonth) {
-                const alphaAttendance = await this.dailyAttendanceRepository.findOne({
-                    where: {
-                        employee: { id_employee },
-                        created_at: Between(lastDate, lastDate),
-                    },
-                });
+        // Update the previous monthly attendance record
+        previousMonthlyAttendance.alpha = parseFloat(previousDailyAttendance.alpha_days) || 0;
+        previousMonthlyAttendance.permit = parseFloat(previousDailyAttendance.permit_days) || 0;
+        previousMonthlyAttendance.attend = parseFloat(previousDailyAttendance.days_present) || 0;
+        previousMonthlyAttendance.total_hour_overtime =
+            parseFloat(previousDailyAttendance.overtime_total) || 0;
+        previousMonthlyAttendance.half_day = parseFloat(previousDailyAttendance.half_days) || 0;
 
-                if (!alphaAttendance) {
-                    // Buat entri absensi alpha jika belum ada
-                    const newAlpha = new DailyAttendance();
-                    newAlpha.employee = employee;
-                    newAlpha.attend_status = 'A'; // Alpha untuk tidak hadir
-                    newAlpha.created_at = new Date(lastDate);
-                    newAlpha.meal_money = 10000; // Contoh nilai uang makan
-                    await this.dailyAttendanceRepository.save(newAlpha);
-                }
-
-                lastDate.setDate(lastDate.getDate() + 1); // Lanjut ke hari berikutnya
-            }
-
-            // Setelah mengisi bulan sebelumnya, kita buat atau update entri bulan tersebut
-            let lastMonthAttendance = await this.monthlyAttendanceRepository.findOne({
-                where: {
-                    employee: { id_employee },
-                    salary_period: `${year}-${lastDateMonth}`,
-                },
-            });
-
-            if (!lastMonthAttendance) {
-                // Buat entri baru jika belum ada untuk bulan sebelumnya
-                lastMonthAttendance = new MonthlyAttendance();
-                lastMonthAttendance.employee = employee;
-                lastMonthAttendance.salary_period = `${year}-${lastDateMonth}`;
-            }
-
-            // Perbarui data kehadiran bulanan
-            await this.updateMonthlyAttendance(lastMonthAttendance, id_employee, lastDateMonth, year);
-        }
-
-        // Sekarang kita sudah berada di bulan baru (November), kita buat atau update data bulan baru
-        let currentMonthAttendance = await this.monthlyAttendanceRepository.findOne({
-            where: {
-                employee: { id_employee },
-                salary_period: `${year}-${month}`,
-            },
-        });
-
-        if (!currentMonthAttendance) {
-            // Buat entri baru untuk bulan baru jika belum ada
-            currentMonthAttendance = new MonthlyAttendance();
-            currentMonthAttendance.employee = employee;
-            currentMonthAttendance.salary_period = `${year}-${month}`;
-        }
-
-        // Update kehadiran bulanan untuk bulan baru
-        await this.updateMonthlyAttendance(currentMonthAttendance, id_employee, month, year);
-    } else {
-        // Jika tidak ada kehadiran sebelumnya, buat entri baru untuk bulan saat ini
-        let currentMonthAttendance = await this.monthlyAttendanceRepository.findOne({
-            where: {
-                employee: { id_employee },
-                salary_period: `${year}-${month}`,
-            },
-        });
-
-        if (!currentMonthAttendance) {
-            // Buat entri baru jika belum ada
-            currentMonthAttendance = new MonthlyAttendance();
-            currentMonthAttendance.employee = employee;
-            currentMonthAttendance.salary_period = `${year}-${month}`;
-        }
-
-        // Update kehadiran bulanan
-        await this.updateMonthlyAttendance(currentMonthAttendance, id_employee, month, year);
+        // Save the updated previous monthly attendance record
+        await this.monthlyAttendanceRepository.save(previousMonthlyAttendance);
     }
-}
 
-// Fungsi helper untuk memperbarui atau membuat entri kehadiran bulanan
-async updateMonthlyAttendance(monthlyAttendance: MonthlyAttendance, id_employee: number, month: number, year: number) {
-    const startOfMonth = new Date(year, month - 1, 1);
-    const endOfMonth = new Date(year, month, 0);
-
+    // Now calculate for the current month
     const dailyAttendance = await this.dailyAttendanceRepository
         .createQueryBuilder('daily_attendance')
         .select('COUNT(*)', 'total_days')
@@ -861,7 +812,21 @@ async updateMonthlyAttendance(monthlyAttendance: MonthlyAttendance, id_employee:
         )
         .getRawOne();
 
-    // Update data kehadiran bulanan
+    // Create or update the current month's attendance record
+    let monthlyAttendance = await this.monthlyAttendanceRepository.findOne({
+        where: {
+            employee: { id_employee },
+            salary_period: `${year}-${month}`, // Check by year and month
+        },
+    });
+
+    if (!monthlyAttendance) {
+        monthlyAttendance = new MonthlyAttendance();
+        monthlyAttendance.employee = employee;
+        monthlyAttendance.salary_period = `${year}-${month}`;
+    }
+
+    // Update data for the current month
     monthlyAttendance.alpha = parseFloat(dailyAttendance.alpha_days) || 0;
     monthlyAttendance.permit = parseFloat(dailyAttendance.permit_days) || 0;
     monthlyAttendance.attend = parseFloat(dailyAttendance.days_present) || 0;
@@ -869,8 +834,14 @@ async updateMonthlyAttendance(monthlyAttendance: MonthlyAttendance, id_employee:
         parseFloat(dailyAttendance.overtime_total) || 0;
     monthlyAttendance.half_day = parseFloat(dailyAttendance.half_days) || 0;
 
-    // Simpan ke database
+    // Save the current month's attendance record
     await this.monthlyAttendanceRepository.save(monthlyAttendance);
+
+    return {
+        statusCode: 201,
+        message: 'Monthly attendance updated successfully',
+        data: monthlyAttendance,
+    };
 }
 
 
